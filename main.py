@@ -231,3 +231,10 @@ async def add_episode(req: AddEpisodeRequest):
     except Exception as e:
         logger.error(f"Error en /add-episode: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/debug-prompts")
+async def debug_prompts():
+    import graphiti_core.utils.maintenance.node_operations as node_ops
+    return {
+        "extract_message_nodes": node_ops.extract_message_nodes.__name__
+    }
