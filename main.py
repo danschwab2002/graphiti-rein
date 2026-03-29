@@ -9,20 +9,139 @@ from pydantic import BaseModel
 
 from graphiti_core import Graphiti
 from graphiti_core.nodes import EpisodeType
+from graphiti_core.prompts import prompt_library
+from graphiti_core.prompts.models import Message
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ── Configuración desde variables de entorno ──────────────────────────────────
-NEO4J_URI      = os.environ["NEO4J_URI"]       # bolt://neo4j:7687
-NEO4J_USER     = os.environ["NEO4J_USER"]      # neo4j
-NEO4J_PASSWORD = os.environ["NEO4J_PASSWORD"]  # tu_password_segura
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]  # key fija de la plataforma
-API_SECRET     = os.environ.get("API_SECRET", "")  # token interno para proteger el endpoint
+NEO4J_URI      = os.environ["NEO4J_URI"]
+NEO4J_USER     = os.environ["NEO4J_USER"]
+NEO4J_PASSWORD = os.environ["NEO4J_PASSWORD"]
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+API_SECRET     = os.environ.get("API_SECRET", "")
 
 os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
-# ── Instancia global de Graphiti (se inicializa una sola vez al arrancar) ─────
+
+# ── Prompts personalizados para RE(IN) ────────────────────────────────────────
+
+def rein_extract_nodes(context: dict) -> list[Message]:
+    sys_prompt = """Sos un sistema de extracción de entidades para RE(IN), 
+una incubadora de negocios digitales.
+
+Tu tarea es identificar las entidades relevantes de una conversación 
+entre un alumno emprendedor y su copiloto de IA.
+
+EXTRAE entidades como:
+- El alumno (siempre extrae al alumno como entidad principal)
+- Negocios, proyectos, emprendimientos mencionados
+- Nichos o industrias específicas mencionadas
+- Herramientas, plataformas o canales mencionados
+- Mentores, clientes, socios mencionados
+
+NO EXTRAIGAS:
+- Datos estáticos de identidad como nombre, edad o ubicación del alumno
+  (esos se manejan en otro sistema)
+- Conceptos teóricos o educativos del programa RE(IN)
+- Relaciones o acciones entre entidades (esas van en los edges)
+- Fechas o información temporal (van en los edges)"""
+
+    user_prompt = f"""
+Conversación previa:
+{[ep['content'] for ep in context['previous_episodes']]}
+
+Mensaje actual:
+{context['episode_content']}
+
+Extraé las entidades relevantes del mensaje actual considerando 
+el contexto de la conversación previa.
+
+Respondé con un JSON en este formato:
+{{
+    "extracted_nodes": [
+        {{
+            "name": "Nombre único de la entidad",
+            "labels": ["Entity"],
+            "summary": "Descripción breve del rol de esta entidad"
+        }}
+    ]
+}}
+"""
+    return [
+        Message(role='system', content=sys_prompt),
+        Message(role='user', content=user_prompt),
+    ]
+
+
+def rein_extract_edges(context: dict) -> list[Message]:
+    sys_prompt = """Sos un sistema de extracción de relaciones y hechos 
+para RE(IN), una incubadora de negocios digitales.
+
+Tu tarea es identificar los hechos y relaciones relevantes de una 
+conversación entre un alumno emprendedor y su copiloto de IA.
+
+EXTRAE hechos como:
+- Decisiones de negocio tomadas por el alumno
+- Cambios de nicho, pivots o cambios de dirección
+- Estado actual del negocio (tiene clientes, está prospectando, etc.)
+- Acciones que el alumno confirmó que está haciendo o hizo
+- Contenido del programa que el alumno trabajó o consumió
+- Dificultades o bloqueos que el alumno mencionó
+- Logros o avances concretos del alumno
+
+NO EXTRAIGAS como hechos:
+- Recomendaciones del asistente que el alumno no confirmó
+- Sugerencias hipotéticas o condicionales
+- Conceptos teóricos explicados por el asistente
+- Datos estáticos de identidad (nombre, edad, ubicación)"""
+
+    user_prompt = f"""
+Nodos disponibles:
+{context['nodes']}
+
+Episodios previos:
+{[ep['content'] for ep in context['previous_episodes']]}
+
+Episodio actual:
+{context['episode_content']}
+
+Extraé los hechos y relaciones del episodio actual.
+
+IMPORTANTE: Solo extraé hechos que el ALUMNO confirmó explícitamente.
+Si el asistente recomendó algo pero el alumno no lo confirmó → no lo extraigas.
+
+Respondé con un JSON en este formato:
+{{
+    "edges": [
+        {{
+            "relation_type": "TIPO_RELACION_EN_MAYUSCULAS",
+            "source_node_uuid": "uuid del nodo origen",
+            "target_node_uuid": "uuid del nodo destino",
+            "fact": "descripción concreta del hecho con contexto temporal si aplica",
+            "valid_at": "YYYY-MM-DDTHH:MM:SSZ o null",
+            "invalid_at": "YYYY-MM-DDTHH:MM:SSZ o null"
+        }}
+    ]
+}}
+"""
+    return [
+        Message(role='system', content=sys_prompt),
+        Message(role='user', content=user_prompt),
+    ]
+
+
+# ── Monkey-patch del prompt_library ──────────────────────────────────────────
+# Reemplazamos las funciones nativas con las personalizadas para RE(IN)
+# Esto afecta a todos los módulos que importan prompt_library
+
+prompt_library.extract_nodes.v2.func = rein_extract_nodes
+prompt_library.extract_edges.v2.func = rein_extract_edges
+
+logger.info("Prompts personalizados de RE(IN) aplicados correctamente.")
+
+
+# ── Instancia global de Graphiti ──────────────────────────────────────────────
 graphiti: Graphiti = None
 
 
@@ -31,7 +150,6 @@ async def lifespan(app: FastAPI):
     global graphiti
     logger.info("Inicializando Graphiti...")
     graphiti = Graphiti(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
-    # Crea los índices necesarios en Neo4j (solo hace algo la primera vez)
     await graphiti.build_indices_and_constraints()
     logger.info("Graphiti listo.")
     yield
@@ -41,8 +159,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Graphiti Memory API",
-    description="Microservicio de memoria a largo plazo para el RE(IN) app",
-    version="1.0.0",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
@@ -54,13 +171,11 @@ app.add_middleware(
 )
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 def verify_secret(secret: str):
     if API_SECRET and secret != API_SECRET:
         raise HTTPException(status_code=401, detail="No autorizado")
 
 
-# ── Modelos de request ────────────────────────────────────────────────────────
 class SearchRequest(BaseModel):
     query: str
     user_id: str
@@ -69,7 +184,7 @@ class SearchRequest(BaseModel):
 
 
 class Message(BaseModel):
-    role: str   # "user" o "assistant"
+    role: str
     content: str
 
 
@@ -79,8 +194,6 @@ class AddEpisodeRequest(BaseModel):
     secret: str = ""
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
-
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -88,13 +201,7 @@ async def health():
 
 @app.post("/search")
 async def search(req: SearchRequest):
-    """
-    Busca memorias relevantes de un usuario dado su mensaje actual.
-    Llamar ANTES del nodo de Claude en n8n.
-    Devuelve un bloque de texto listo para inyectar en el system prompt.
-    """
     verify_secret(req.secret)
-
     try:
         results = await graphiti.search(
             query=req.query,
@@ -105,13 +212,21 @@ async def search(req: SearchRequest):
         if not results:
             return {"context": "", "facts": []}
 
-        facts = [r.fact for r in results if r.fact]
+        facts_with_dates = []
+        for r in results:
+            if not r.fact:
+                continue
+            date_str = ""
+            if hasattr(r, 'valid_at') and r.valid_at:
+                date_str = f" (desde {r.valid_at.strftime('%B %Y')})"
+                if hasattr(r, 'invalid_at') and r.invalid_at:
+                    date_str = f" ({r.valid_at.strftime('%B %Y')} - {r.invalid_at.strftime('%B %Y')})"
+            facts_with_dates.append(f"- {r.fact}{date_str}")
 
-        # Bloque de texto listo para el system prompt de Claude
-        context = "MEMORIA DEL ALUMNO (historial y contexto relevante):\n"
-        context += "\n".join(f"- {fact}" for fact in facts)
+        context = "MEMORIA EPISÓDICA DEL ALUMNO:\n"
+        context += "\n".join(facts_with_dates)
 
-        return {"context": context, "facts": facts}
+        return {"context": context, "facts": [r.fact for r in results if r.fact]}
 
     except Exception as e:
         logger.error(f"Error en /search: {e}")
@@ -120,14 +235,8 @@ async def search(req: SearchRequest):
 
 @app.post("/add-episode")
 async def add_episode(req: AddEpisodeRequest):
-    """
-    Guarda el intercambio de mensajes en el grafo de memoria del usuario.
-    Llamar DESPUÉS de que Claude respondió en n8n.
-    """
     verify_secret(req.secret)
-
     try:
-        # Convertir mensajes al formato de texto que Graphiti procesa
         episode_body = "\n".join(
             f"{msg.role.upper()}: {msg.content}"
             for msg in req.messages
@@ -136,7 +245,7 @@ async def add_episode(req: AddEpisodeRequest):
         await graphiti.add_episode(
             name=f"conv_{req.user_id}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
             episode_body=episode_body,
-            source_description="Conversación con el copiloto RE(IN)",
+            source_description="Conversación de coaching entre alumno emprendedor y copiloto RE(IN). Extraer decisiones de negocio, cambios de dirección, acciones confirmadas por el alumno, contenido del programa trabajado, y evolución del negocio. NO extraer recomendaciones del asistente que el alumno no haya confirmado.",
             reference_time=datetime.now(timezone.utc),
             source=EpisodeType.message,
             group_id=req.user_id,
