@@ -238,3 +238,20 @@ async def debug_prompts():
     return {
         "extract_message_nodes": node_ops.extract_message_nodes.__name__
     }
+
+@app.delete("/admin/clear-user/{user_id}")
+async def clear_user_graph(user_id: str, secret: str = ""):
+    verify_secret(secret)
+    try:
+        async with graphiti.driver.session() as session:
+            result = await session.run(
+                "MATCH (n) WHERE n.group_id = $group_id DETACH DELETE n",
+                group_id=user_id
+            )
+            summary = await result.consume()
+            return {
+                "status": "ok",
+                "nodes_deleted": summary.counters.nodes_deleted
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
