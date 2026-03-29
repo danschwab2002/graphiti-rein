@@ -239,7 +239,7 @@ async def debug_prompts():
         "extract_message_nodes": node_ops.extract_message_nodes.__name__
     }
 
-@app.delete("/admin/clear-user/{user_id}")
+@app.post("/admin/clear-user/{user_id}")
 async def clear_user_graph(user_id: str, secret: str = ""):
     verify_secret(secret)
     try:
